@@ -44,6 +44,12 @@ const (
 	// CloudStack >= 4.6 is required for it to work.
 	ServiceAnnotationLoadBalancerProxyProtocol = "service.beta.kubernetes.io/cloudstack-load-balancer-proxy-protocol"
 
+	// ServiceAnnotationLoadBalancerIPMode is the annotation used on the
+	// service to enable the proxy protocol support on Kubernetes services.
+	// Note that this setting only applies to Kubernetes >= v1.32 is required for it to work.
+	// Supported options are "VIP" and "Proxy".
+	ServiceAnnotationLoadBalancerIPMode = "service.beta.kubernetes.io/cloudstack-load-balancer-ip-mode"
+
 	// ServiceAnnotationLoadBalancerLoadbalancerHostname can be used in conjunction
 	// with PROXY protocol to allow the service to be accessible from inside the
 	// cluster. This is a workaround for https://github.com/kubernetes/kubernetes/issues/66607
@@ -258,6 +264,13 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 	}
 	// Default to IP
 	status.Ingress = []corev1.LoadBalancerIngress{{IP: lb.ipAddr}}
+
+	// Checks if annotation was set, if not, fallbacks to default mode ("VIP" for tcp and "Proxy" for tcp-proxy)
+	if ipmode := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerIPMode, ""); ipmode != "" {
+		status.Ingress = []corev1.LoadBalancerIngress{{IPMode: (*corev1.LoadBalancerIPMode)(&ipmode)}}
+
+		return status, nil
+	}
 
 	return status, nil
 }
