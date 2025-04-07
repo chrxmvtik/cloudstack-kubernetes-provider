@@ -175,6 +175,11 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 		// All ports have their own load balancer rule, so add the port to lbName to keep the names unique.
 		lbRuleName := fmt.Sprintf("%s-%s-%d", lb.name, protocol, port.Port)
 
+		lbSourceRanges, err := getLoadBalancerSourceRanges(service)
+		if err != nil {
+			return nil, err
+		}
+
 		// If the load balancer rule exists and is up-to-date, we move on to the next rule.
 		lbRule, needsUpdate, err := lb.checkLoadBalancerRule(lbRuleName, port, protocol)
 		if err != nil {
@@ -196,7 +201,7 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 			}
 		} else {
 			klog.V(4).Infof("Creating load balancer rule: %v", lbRuleName)
-			lbRule, err = lb.createLoadBalancerRule(lbRuleName, port, protocol)
+			lbRule, err = lb.createLoadBalancerRule(lbRuleName, port, protocol, lbSourceRanges.StringSlice())
 			if err != nil {
 				return nil, err
 			}
@@ -216,21 +221,19 @@ func (cs *CSCloud) EnsureLoadBalancer(ctx context.Context, clusterName string, s
 			return nil, err
 		}
 
-		lbSourceRanges, err := getLoadBalancerSourceRanges(service)
-		if err != nil {
-			return nil, err
-		}
-
 		if lbRule != nil && isFirewallSupported(network.Service) {
 			klog.V(4).Infof("Creating firewall rules for load balancer rule: %v (%v:%v:%v)", lbRuleName, protocol, lbRule.Publicip, port.Port)
 			if _, err := lb.updateFirewallRule(lbRule.Publicipid, int(port.Port), protocol, lbSourceRanges.StringSlice()); err != nil {
 				return nil, err
 			}
+		} else if lbRule != nil {
+			klog.V(4).Infof("Created loadbalancer rule with specified cidr: %v (cidr:%v)", lbRuleName, lbSourceRanges)
 		} else {
 			msg := fmt.Sprintf("LoadBalancerSourceRanges are ignored for Service %s because this CloudStack network does not support it", serviceName)
 			cs.eventRecorder.Event(service, corev1.EventTypeWarning, "LoadBalancerSourceRangesIgnored", msg)
 			klog.Warning(msg)
 		}
+
 	}
 
 	// Cleanup any rules that are now still in the rules map, as they are no longer needed.
@@ -606,8 +609,9 @@ func (lb *loadBalancer) checkLoadBalancerRule(lbRuleName string, port corev1.Ser
 	if lbRule.Publicip == lb.ipAddr && lbRule.Privateport == strconv.Itoa(int(port.NodePort)) && lbRule.Publicport == strconv.Itoa(int(port.Port)) {
 		updateAlgo := lbRule.Algorithm != lb.algorithm
 		updateProto := lbRule.Protocol != protocol.CSProtocol()
+		updateCidrlist := lbRule.Cidrlist != lb.rules[lbRule.Name].Cidrlist
 
-		return lbRule, updateAlgo || updateProto, nil
+		return lbRule, updateAlgo || updateProto || updateCidrlist, nil
 	}
 
 	// Delete the load balancer rule so we can create a new one using the new values.
@@ -632,7 +636,7 @@ func (lb *loadBalancer) updateLoadBalancerRule(lbRuleName string, protocol LoadB
 }
 
 // createLoadBalancerRule creates a new load balancer rule and returns its ID.
-func (lb *loadBalancer) createLoadBalancerRule(lbRuleName string, port corev1.ServicePort, protocol LoadBalancerProtocol) (*cloudstack.LoadBalancerRule, error) {
+func (lb *loadBalancer) createLoadBalancerRule(lbRuleName string, port corev1.ServicePort, protocol LoadBalancerProtocol, cidrlist []string) (*cloudstack.LoadBalancerRule, error) {
 	p := lb.LoadBalancer.NewCreateLoadBalancerRuleParams(
 		lb.algorithm,
 		lbRuleName,
@@ -644,6 +648,8 @@ func (lb *loadBalancer) createLoadBalancerRule(lbRuleName string, port corev1.Se
 	p.SetPublicipid(lb.ipAddrID)
 
 	p.SetProtocol(protocol.CSProtocol())
+
+	p.SetCidrlist(cidrlist)
 
 	// Do not open the firewall implicitly, we always create explicit firewall rules
 	p.SetOpenfirewall(false)
